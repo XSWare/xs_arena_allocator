@@ -1,4 +1,5 @@
 #![feature(allocator_api)]
+#![feature(slice_ptr_get)]
 
 use std::{
     alloc::{AllocError, Allocator, Layout},
@@ -39,6 +40,7 @@ impl<'a> ArenaAllocator<'a> {
         unsafe { (*self.mem_pool.get()).len() }
     }
 
+    #[allow(unused)]
     fn print_arena(&self) {
         unsafe {
             println!("{:?}", &(*self.mem_pool.get()));
@@ -55,8 +57,15 @@ impl<'a> ArenaAllocator<'a> {
             // it is important that the value used for the calculations can't be changed by another thread
             // since we need to very the result with a compare_exchange in the end.
             let offset = self.offset.load(Ordering::Acquire);
+            let align_offset = unsafe { self.mem_pool.get().as_mut_ptr().add(offset).align_offset(layout.align()) };
+
+            // failed to find suitable alignment
+            if align_offset == usize::MAX {
+                return Err(AllocError);
+            }
+
             // make sure memory is aligned
-            let start = offset.next_multiple_of(layout.align());
+            let start = offset + align_offset;
             // end will always be aligned if start is aligned since the requested size can only be multiples
             let end = start + requested_size;
 
@@ -82,7 +91,7 @@ unsafe impl Allocator for ArenaAllocator<'_> {
         let (mem_start, mem_end) = self.get_aligned_memory_bounds(layout)?;
 
         unsafe {
-            let mem_ptr = &mut (*self.mem_pool.get())[mem_start..mem_end];
+            let mem_ptr = self.mem_pool.get().get_unchecked_mut(mem_start..mem_end);
             Ok(NonNull::<[u8]>::new_unchecked(mem_ptr))
         }
     }
