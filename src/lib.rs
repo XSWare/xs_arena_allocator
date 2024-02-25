@@ -35,10 +35,6 @@ impl<'a> ArenaAllocator<'a> {
         }
     }
 
-    fn offset(&self) -> usize {
-        self.offset.load(Ordering::Relaxed)
-    }
-
     fn capacity(&self) -> usize {
         unsafe { (*self.mem_pool.get()).len() }
     }
@@ -48,21 +44,41 @@ impl<'a> ArenaAllocator<'a> {
             println!("{:?}", &(*self.mem_pool.get()));
         }
     }
-}
 
-unsafe impl Allocator for ArenaAllocator<'_> {
-    fn allocate(&self, layout: Layout) -> Result<std::ptr::NonNull<[u8]>, AllocError> {
-        unsafe {
-            let requested_size = layout.size();
-            let offset_aligned = self.offset().next_multiple_of(layout.align());
+    /// returns the offset start and end for the allocated memory.
+    #[must_use]
+    fn get_aligned_memory_bounds(&self, layout: Layout) -> Result<(usize, usize), AllocError> {
+        let requested_size = layout.size();
+
+        loop {
+            // get a copy of the current value of the offset.
+            // it is important that the value used for the calculations can't be changed by another thread
+            // since we need to very the result with a compare_exchange in the end.
+            let offset = self.offset.load(Ordering::Acquire);
+            let offset_aligned = offset.next_multiple_of(layout.align());
             let offset_end = offset_aligned + requested_size;
 
             if offset_end > self.capacity() {
                 return Err(AllocError);
             }
 
-            self.offset.store(offset_end, Ordering::Relaxed);
+            // if there is enough space available and nobody else claimed that space in the meantime the result is returned.
+            // otherwise the process needs to be retried.
+            if self
+                .offset
+                .compare_exchange(offset, offset_end, Ordering::Release, Ordering::SeqCst)
+                .is_ok()
+            {
+                return Ok((offset_aligned, offset_end));
+            }
+        }
+    }
+}
 
+unsafe impl Allocator for ArenaAllocator<'_> {
+    fn allocate(&self, layout: Layout) -> Result<std::ptr::NonNull<[u8]>, AllocError> {
+        unsafe {
+            let (offset_aligned, offset_end) = self.get_aligned_memory_bounds(layout)?;
             let mem_ptr = &mut (*self.mem_pool.get())[offset_aligned..offset_end];
             Ok(NonNull::<[u8]>::new_unchecked(mem_ptr))
         }
