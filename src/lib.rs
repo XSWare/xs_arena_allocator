@@ -1,6 +1,5 @@
 #![feature(allocator_api)]
 #![feature(slice_ptr_get)]
-#![feature(non_null_convenience)]
 
 use std::{
     alloc::{AllocError, Allocator, Layout},
@@ -72,6 +71,13 @@ impl Arena {
             }
         }
     }
+
+    #[allow(unused)]
+    fn print(&self) {
+        unsafe {
+            println!("{:?}", self.mem_pool.as_ref());
+        }
+    }
 }
 
 impl Drop for Arena {
@@ -94,9 +100,7 @@ impl ArenaAllocator {
 
     #[allow(unused)]
     fn print_arena(&self) {
-        unsafe {
-            println!("{:?}", &self.arena.mem_pool);
-        }
+        self.arena.print();
     }
 }
 
