@@ -114,29 +114,35 @@ unsafe impl Allocator for ArenaAllocator {
 
 #[cfg(test)]
 mod test {
-    use std::thread;
+    use std::thread::{self, JoinHandle};
 
     use super::*;
 
     #[test]
     fn allocation() {
-        let arena_alloc = ArenaAllocator::new(Arena::new(8));
-        let mut vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_alloc.clone());
-        let mut vec2 = Vec::<u32, ArenaAllocator>::with_capacity_in(1, arena_alloc.clone());
+        let thread_count = 10;
+        let arena_alloc = ArenaAllocator::new(Arena::new(thread_count * 8));
+        let mut join_handles = Vec::with_capacity(thread_count);
 
-        vec1.push(0xAA);
-        vec1.push(0x55);
-        vec2.push(0xFFFFFFFF);
+        for _ in 0..thread_count {
+            let alloc = arena_alloc.clone();
+            join_handles.push(spawn_allocating_thread(alloc));
+        }
 
-        println!("{:?}", vec1);
-        println!("{:?}", vec2);
+        join_handles.into_iter().for_each(|j| {
+            j.join().unwrap();
+        });
 
         arena_alloc.print_arena();
     }
 
-    fn _spawn_allocating_thread(arena_allocator: ArenaAllocator) {
+    fn spawn_allocating_thread(arena_allocator: ArenaAllocator) -> JoinHandle<()> {
         thread::spawn(move || {
-            let _vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_allocator);
-        });
+            let mut vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_allocator.clone());
+            let mut vec2 = Vec::<u32, ArenaAllocator>::with_capacity_in(1, arena_allocator);
+            vec1.push(0xAA);
+            vec1.push(0x55);
+            vec2.push(0xFFFFFFFF);
+        })
     }
 }
