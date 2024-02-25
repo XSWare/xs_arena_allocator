@@ -55,10 +55,12 @@ impl<'a> ArenaAllocator<'a> {
             // it is important that the value used for the calculations can't be changed by another thread
             // since we need to very the result with a compare_exchange in the end.
             let offset = self.offset.load(Ordering::Acquire);
-            let offset_aligned = offset.next_multiple_of(layout.align());
-            let offset_end = offset_aligned + requested_size;
+            // make sure memory is aligned
+            let start = offset.next_multiple_of(layout.align());
+            // end will always be aligned if start is aligned since the requested size can only be multiples
+            let end = start + requested_size;
 
-            if offset_end > self.capacity() {
+            if end > self.capacity() {
                 return Err(AllocError);
             }
 
@@ -66,10 +68,10 @@ impl<'a> ArenaAllocator<'a> {
             // otherwise the process needs to be retried.
             if self
                 .offset
-                .compare_exchange(offset, offset_end, Ordering::Release, Ordering::SeqCst)
+                .compare_exchange(offset, end, Ordering::Release, Ordering::SeqCst)
                 .is_ok()
             {
-                return Ok((offset_aligned, offset_end));
+                return Ok((start, end));
             }
         }
     }
@@ -77,9 +79,10 @@ impl<'a> ArenaAllocator<'a> {
 
 unsafe impl Allocator for ArenaAllocator<'_> {
     fn allocate(&self, layout: Layout) -> Result<std::ptr::NonNull<[u8]>, AllocError> {
+        let (mem_start, mem_end) = self.get_aligned_memory_bounds(layout)?;
+
         unsafe {
-            let (offset_aligned, offset_end) = self.get_aligned_memory_bounds(layout)?;
-            let mem_ptr = &mut (*self.mem_pool.get())[offset_aligned..offset_end];
+            let mem_ptr = &mut (*self.mem_pool.get())[mem_start..mem_end];
             Ok(NonNull::<[u8]>::new_unchecked(mem_ptr))
         }
     }
