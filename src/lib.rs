@@ -5,13 +5,19 @@ use std::{
     alloc::{AllocError, Allocator, Layout},
     cell::UnsafeCell,
     ptr::NonNull,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 pub struct Arena {
     mem_pool: Box<[u8]>,
     offset: AtomicUsize,
 }
+
+unsafe impl Send for Arena {}
+unsafe impl Sync for Arena {}
 
 impl Arena {
     pub fn new(capacity: usize) -> Self {
@@ -22,28 +28,28 @@ impl Arena {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ArenaAllocator<'a> {
-    mem_pool: &'a UnsafeCell<[u8]>,
-    offset: &'a AtomicUsize,
+#[derive(Clone)]
+pub struct ArenaAllocator {
+    arena: Arc<Arena>,
 }
 
-impl<'a> ArenaAllocator<'a> {
-    pub fn new(arena: &'a mut Arena) -> Self {
-        Self {
-            mem_pool: unsafe { std::mem::transmute(arena.mem_pool.as_mut() as *mut [u8]) },
-            offset: &arena.offset,
-        }
+impl ArenaAllocator {
+    pub fn new(arena: Arena) -> Self {
+        Self { arena: Arc::new(arena) }
+    }
+
+    fn get_mem_pool(&self) -> &UnsafeCell<[u8]> {
+        unsafe { std::mem::transmute(self.arena.mem_pool.as_ref()) }
     }
 
     fn capacity(&self) -> usize {
-        unsafe { (*self.mem_pool.get()).len() }
+        self.arena.mem_pool.len()
     }
 
     #[allow(unused)]
     fn print_arena(&self) {
         unsafe {
-            println!("{:?}", &(*self.mem_pool.get()));
+            println!("{:?}", &self.arena.mem_pool);
         }
     }
 
@@ -56,8 +62,8 @@ impl<'a> ArenaAllocator<'a> {
             // get a copy of the current value of the offset.
             // it is important that the value used for the calculations can't be changed by another thread
             // since we need to very the result with a compare_exchange in the end.
-            let offset = self.offset.load(Ordering::Acquire);
-            let align_offset = unsafe { self.mem_pool.get().as_mut_ptr().add(offset).align_offset(layout.align()) };
+            let offset = self.arena.offset.load(Ordering::Acquire);
+            let align_offset = unsafe { self.get_mem_pool().get().as_mut_ptr().add(offset).align_offset(layout.align()) };
 
             // failed to find suitable alignment
             if align_offset == usize::MAX {
@@ -76,6 +82,7 @@ impl<'a> ArenaAllocator<'a> {
             // if there is enough space available and nobody else claimed that space in the meantime the result is returned.
             // otherwise the process needs to be retried.
             if self
+                .arena
                 .offset
                 .compare_exchange(offset, end, Ordering::Release, Ordering::SeqCst)
                 .is_ok()
@@ -86,12 +93,12 @@ impl<'a> ArenaAllocator<'a> {
     }
 }
 
-unsafe impl Allocator for ArenaAllocator<'_> {
+unsafe impl Allocator for ArenaAllocator {
     fn allocate(&self, layout: Layout) -> Result<std::ptr::NonNull<[u8]>, AllocError> {
         let (mem_start, mem_end) = self.get_aligned_memory_bounds(layout)?;
 
         unsafe {
-            let mem_ptr = self.mem_pool.get().get_unchecked_mut(mem_start..mem_end);
+            let mem_ptr = self.get_mem_pool().get().get_unchecked_mut(mem_start..mem_end);
             Ok(NonNull::<[u8]>::new_unchecked(mem_ptr))
         }
     }
@@ -99,19 +106,31 @@ unsafe impl Allocator for ArenaAllocator<'_> {
     unsafe fn deallocate(&self, _ptr: std::ptr::NonNull<u8>, _layout: Layout) {}
 }
 
-#[test]
-fn allocation() {
-    let mut arena = Arena::new(8);
-    let arena_alloc = ArenaAllocator::new(&mut arena);
-    let mut vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_alloc);
-    let mut vec2 = Vec::<u32, ArenaAllocator>::with_capacity_in(1, arena_alloc);
+#[cfg(test)]
+mod test {
+    use std::thread;
 
-    vec1.push(0xAA);
-    vec1.push(0x55);
-    vec2.push(0xFFFFFFFF);
+    use super::*;
 
-    println!("{:?}", vec1);
-    println!("{:?}", vec2);
+    #[test]
+    fn allocation() {
+        let arena_alloc = ArenaAllocator::new(Arena::new(8));
+        let mut vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_alloc.clone());
+        let mut vec2 = Vec::<u32, ArenaAllocator>::with_capacity_in(1, arena_alloc.clone());
 
-    arena_alloc.print_arena();
+        vec1.push(0xAA);
+        vec1.push(0x55);
+        vec2.push(0xFFFFFFFF);
+
+        println!("{:?}", vec1);
+        println!("{:?}", vec2);
+
+        arena_alloc.print_arena();
+    }
+
+    fn _spawn_allocating_thread(arena_allocator: ArenaAllocator) {
+        thread::spawn(move || {
+            let _vec1 = Vec::<u8, ArenaAllocator>::with_capacity_in(2, arena_allocator);
+        });
+    }
 }
