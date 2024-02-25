@@ -10,6 +10,8 @@ use std::{
     },
 };
 
+/// allocates a memory pool during construction and only de-allocates it during `drop()`.
+/// chunks of the memory pool can be requested until nothing is left, which makes every consecutive call fail.
 pub struct Arena {
     mem_pool: NonNull<[u8]>,
     offset: AtomicUsize,
@@ -19,6 +21,7 @@ unsafe impl Send for Arena {}
 unsafe impl Sync for Arena {}
 
 impl Arena {
+    /// create a new arena with the passed capacity in bytes.
     pub fn new(capacity: usize) -> Self {
         Self {
             mem_pool: unsafe { NonNull::new_unchecked(Box::into_raw(vec![0; capacity].into_boxed_slice())) },
@@ -26,11 +29,18 @@ impl Arena {
         }
     }
 
-    fn capacity(&self) -> usize {
+    /// returns the maximum capacity of the arena, including the space thats already used.
+    pub fn capacity(&self) -> usize {
         self.mem_pool.len()
     }
 
-    fn get_next_mem_slice(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+    /// returns the available space of the arena in bytes.
+    pub fn available_space(&self) -> usize {
+        self.capacity() - self.offset.load(Ordering::Relaxed)
+    }
+
+    /// returns a pointer to a memory slice with the size and alignment of the passed `Layout`.
+    pub fn get_next_mem_slice(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
         let (start, end) = self.get_aligned_memory_bounds(layout)?;
         unsafe { Ok(self.mem_pool.get_unchecked_mut(start..end)) }
     }
@@ -72,8 +82,10 @@ impl Arena {
         }
     }
 
-    #[allow(unused)]
-    fn print(&self) {
+    /// SAFETY: must not be called while any &mut to the memory pool exist.
+    /// this means ALL allocations were freed beforehand.
+    #[cfg(test)]
+    pub unsafe fn print(&self) {
         unsafe {
             println!("{:?}", self.mem_pool.as_ref());
         }
@@ -88,6 +100,7 @@ impl Drop for Arena {
     }
 }
 
+/// bump style arena allocator.
 #[derive(Clone)]
 pub struct ArenaAllocator {
     arena: Arc<Arena>,
@@ -98,9 +111,10 @@ impl ArenaAllocator {
         Self { arena: Arc::new(arena) }
     }
 
-    #[allow(unused)]
-    fn print_arena(&self) {
-        self.arena.print();
+    /// SAFETY: the arena must not be used while there are still active allocations.
+    #[cfg(test)]
+    pub unsafe fn get_arena(&self) -> &Arena {
+        &self.arena
     }
 }
 
@@ -120,8 +134,10 @@ mod test {
 
     #[test]
     fn allocation() {
-        let thread_count = 10;
-        let arena_alloc = ArenaAllocator::new(Arena::new(thread_count * 8));
+        let thread_count = 100;
+        // 2x1 byte + 1x4 byte allocation that can take up to 7 bytes with alignment = 9 bytes max per thread
+        let arena = Arena::new(thread_count * 9);
+        let arena_alloc = ArenaAllocator::new(arena);
         let mut join_handles = Vec::with_capacity(thread_count);
 
         for _ in 0..thread_count {
@@ -133,7 +149,10 @@ mod test {
             j.join().unwrap();
         });
 
-        arena_alloc.print_arena();
+        unsafe {
+            arena_alloc.get_arena().print();
+            println!("available bytes: {}", arena_alloc.arena.available_space())
+        }
     }
 
     fn spawn_allocating_thread(arena_allocator: ArenaAllocator) -> JoinHandle<()> {
